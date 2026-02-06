@@ -25,18 +25,20 @@ SITE_CONFIG = {
     "Shopify": {"cn_name": "Shopify独立站", "color": "#DDA0DD"}
 }
 
+# 流量类型排序（包含Amazon页面总点击，与Excel值完全一致）
 TRAFFIC_ORDER = [
     "Amazon站内广告",   # 1
     "Amazon-DSP",       # 2
     "Amazon自然流量",   # 3
     "Amazon-FB",        # 4
-    "Amazon页面总点击", # 5 新增：Amazon页面总点击链路
+    "Amazon页面总点击", # 5 与Excel流量类型完全匹配
     "SP-GG",            # 6
     "SP-FB",            # 7
     "SP-自然",          # 8
     "SP-其他"           # 9
 ]
 
+# 流量映射（确保Amazon页面总点击配置与Excel一致）
 TRAFFIC_MAPPING = {
     "Amazon站内广告": {
         "group_id": "组1",
@@ -86,7 +88,7 @@ TRAFFIC_MAPPING = {
             "level2_sales": "Amazon-US销量"
         }
     },
-    # 新增：Amazon页面总点击配置
+    # 核心修改：Amazon页面总点击配置（key与Excel流量类型完全一致）
     "Amazon页面总点击": {
         "group_id": "组5",
         "site": "Amazon-US",
@@ -149,12 +151,13 @@ TRAFFIC_MAPPING = {
     }
 }
 
+# 分组颜色（包含组5：Amazon页面总点击）
 GROUP_COLORS = {
     "组1": "#9290E6",  # 站内广告
     "组2": "#4ECDC4",  # DSP
     "组3": "#45B7D1",  # 自然流量
     "组4": "#96CEB4",  # FB
-    "组5": "#6FA8DC",  # 新增：Amazon页面总点击（蓝色系，匹配Amazon站点）
+    "组5": "#6FA8DC",  # Amazon页面总点击（蓝色系匹配Amazon站点）
     "组6": "#FFA726",  # SP-GG
     "组7": "#AB47BC",  # SP-FB
     "组8": "#1C363F",  # SP-自然
@@ -187,66 +190,82 @@ for traffic_type in TRAFFIC_MAPPING:
     for node in unique_nodes:
         NODE_TO_TRAFFIC[node] = traffic_type
 
-# 无效流量类型过滤列表（已移除"Amazon页面总点击"）
+# 无效流量类型过滤列表（已移除Amazon页面总点击）
 INVALID_TRAFFIC_TYPES = ["总曝光", "总点击", "总销量"]
 
-# ===================== 3. 读取Excel函数 =====================
+# ===================== 3. 读取Excel函数（核心修改：兼容数值空值+显示排查日志） =====================
 @st.cache_data
 def read_excel_generate_data(excel_path):
     try:
         df = pd.read_excel(excel_path)
         logger.info(f"成功读取Excel文件，数据行数：{len(df)}")
-        # 新增：显示Excel的列名和前2行，方便排查列名问题
+        # 新增：显示Excel列名和前2行，方便排查列名匹配问题
         st.success(f"✅ 成功读取Excel文件，数据行数：{len(df)}")
-        st.info("Excel列名：" + ", ".join(df.columns.tolist()))
-        st.info("Excel前2行预览：")
-        st.dataframe(df.head(2))  # 显示前2行，确认数据格式
+        st.info(f"📋 Excel列名：{', '.join(df.columns.tolist())}")
+        st.info("🔍 Excel前2行数据预览：")
+        st.dataframe(df.head(2).style.set_caption("Excel数据格式验证"))
         
     except Exception as e:
         logger.error(f"读取Excel失败：{str(e)}")
         st.error(f"❌ 读取Excel失败：{str(e)}")
         return pd.DataFrame()
     
-    # 数据预处理
+    # 数据预处理：时间列处理
+    if "时间" not in df.columns:
+        st.error("❌ Excel缺少「时间」列，请检查列名")
+        return pd.DataFrame()
+    
     df["时间_str"] = df["时间"].astype(str)
     df["date"] = df["时间_str"].str.split(" ").str[0].str.replace("/", "-")
     df["date"] = df["date"].replace(["nan", "NaT", ""], pd.NaT)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     
-    # 新增：显示时间列处理结果，排查日期问题
-    st.info(f"时间列处理后，有效日期行数：{df['date'].notna().sum()}")
+    # 新增：显示时间列处理结果，排查日期格式问题
+    valid_date_count = df["date"].notna().sum()
+    st.info(f"📅 时间列处理结果：有效日期行数{valid_date_count} / 总行数{len(df)}")
+    if valid_date_count == 0:
+        st.warning("⚠️ 未识别到有效日期，请检查Excel「时间」列格式（建议格式：2026/1/5）")
+
+    # 检查核心数值列是否存在
+    required_cols = ["流量类型", "曝光", "点击", "销量"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        st.error(f"❌ Excel缺少核心列：{', '.join(missing_cols)}，请补充后重新上传")
+        return pd.DataFrame()
 
     data_raw = []
     skipped_count = 0  # 统计被跳过的行数
     for idx, row in df.iterrows():
+        # 1. 过滤空日期
         if pd.isna(row["date"]):
             skipped_count +=1
-            logger.debug(f"第{idx+1}行：时间为空，跳过")
             continue
         
-        traffic_type = row["流量类型"]
+        # 2. 过滤无效流量类型
+        traffic_type = str(row["流量类型"]).strip()  # 去除空格，避免匹配失败
         if traffic_type in INVALID_TRAFFIC_TYPES:
             skipped_count +=1
-            logger.debug(f"第{idx+1}行：流量类型是无效类型{traffic_type}，跳过")
             continue
         
+        # 3. 过滤未配置的流量类型（并提示具体值）
         if traffic_type not in TRAFFIC_MAPPING:
             skipped_count +=1
-            logger.warning(f"第{idx+1}行：未配置的流量类型{traffic_type}，跳过")
-            st.warning(f"第{idx+1}行：流量类型「{traffic_type}」未配置，已跳过")  # 显示未配置的流量类型
+            st.warning(f"⚠️ 第{idx+1}行：流量类型「{traffic_type}」未在代码中配置，已跳过")
             continue
         
+        # 4. 过滤非法站点
         cfg = TRAFFIC_MAPPING[traffic_type]
         if cfg["site"] not in SITE_CONFIG:
             skipped_count +=1
-            logger.warning(f"第{idx+1}行：非法站点{cfg['site']}，跳过")
             continue
         
-        # 数值列处理
-        exposure = pd.to_numeric(row["曝光"], errors="coerce") if pd.notna(row["曝光"]) else 0.0
-        click = pd.to_numeric(row["点击"], errors="coerce") if pd.notna(row["点击"]) else 0.0
-        sales = pd.to_numeric(row["销量"], errors="coerce") if pd.notna(row["销量"]) else 0.0
+        # 核心修改：兼容数值列空值/None（将None、空字符串转为0.0）
+        exposure = pd.to_numeric(row["曝光"], errors="coerce") if (pd.notna(row["曝光"]) and str(row["曝光"]).strip() != "") else 0.0
+        click = pd.to_numeric(row["点击"], errors="coerce") if (pd.notna(row["点击"]) and str(row["点击"]).strip() != "") else 0.0
+        sales = pd.to_numeric(row["销量"], errors="coerce") if (pd.notna(row["销量"]) and str(row["销量"]).strip() != "") else 0.0
+        date = row["date"].strftime("%Y-%m-%d")
         
+        # 生成链路数据
         data_raw.extend([
             [traffic_type, cfg["nodes"]["exposure"], float(exposure), date, cfg["group_id"], traffic_type],
             [cfg["nodes"]["exposure"], cfg["nodes"]["level2_exposure"], float(exposure), date, cfg["group_id"], traffic_type],
@@ -259,13 +278,16 @@ def read_excel_generate_data(excel_path):
             [cfg["nodes"]["level2_sales"], "总销量", float(sales), date, cfg["group_id"], traffic_type]
         ])
     
-    # 新增：显示跳过统计
-    st.info(f"共跳过{skipped_count}行数据，有效数据行数：{len(data_raw)//9}（每条原始数据生成9条链路）")
+    # 显示数据过滤统计，方便排查
+    st.info(f"🔍 数据过滤统计：总行数{len(df)} → 跳过{skipped_count}行 → 有效链路数据{len(data_raw)}条")
+    if len(data_raw) == 0:
+        st.error("❌ 未生成有效链路数据，请根据上述提示检查Excel内容")
+        return pd.DataFrame()
     
+    # 最终数据处理
     result_df = pd.DataFrame(data_raw, columns=["source", "target", "value", "date", "group", "traffic_type"])
-    if not result_df.empty:
-        result_df["date"] = pd.to_datetime(result_df["date"])
-        result_df["value"] = pd.to_numeric(result_df["value"], errors="coerce").fillna(0.0)
+    result_df["date"] = pd.to_datetime(result_df["date"])
+    result_df["value"] = pd.to_numeric(result_df["value"], errors="coerce").fillna(0.0)
     logger.info(f"生成链路数据条数：{len(result_df)}")
     return result_df
 
@@ -273,7 +295,7 @@ def read_excel_generate_data(excel_path):
 st.title("🌐 多站点流量-销量桑基图分析")
 st.markdown("---")
 
-# ===================== 5. 先处理文件上传和数据加载（关键修改：提前加载数据提取日期） =====================
+# ===================== 5. 文件上传和数据加载 =====================
 default_excel_path = "1.5-1.19流量数据统计.xlsx"
 df = pd.DataFrame()
 
@@ -288,33 +310,33 @@ if uploaded_file is not None:
     df = read_excel_generate_data(EXCEL_PATH)
     st.sidebar.success(f"📂 已上传文件: {uploaded_file.name}")
 else:
-    # 否则使用默认文件（本地测试时）
+    # 本地测试默认文件
     try:
         df = read_excel_generate_data(default_excel_path)
         st.sidebar.info(f"📂 使用默认文件: {default_excel_path}")
     except Exception as e:
         st.sidebar.error(f"❌ 默认文件加载失败: {str(e)}")
 
-# 提取Excel中的实际有效日期范围（关键修改：自动获取日期最值）
+# 提取Excel中的实际有效日期范围
 default_start_date = datetime.strptime("2026-01-05", "%Y-%m-%d").date()
 default_end_date = datetime.strptime("2026-01-19", "%Y-%m-%d").date()
 
 if not df.empty and df["date"].notna().any():
     min_date = df["date"].min()
     max_date = df["date"].max()
-    default_start_date = min_date.date()  # 转换为date类型，适配streamlit date_input
+    default_start_date = min_date.date()
     default_end_date = max_date.date()
     logger.info(f"自动提取Excel日期范围：{default_start_date} 至 {default_end_date}")
 else:
     logger.warning("未提取到有效日期，使用兜底默认值")
 
-# ===================== 6. 继续渲染侧边栏其他控件（使用自动提取的日期作为默认值） =====================
+# ===================== 6. 侧边栏其他控件 =====================
 with st.sidebar:
-    # 搜索区域
+    # 搜索区域（支持搜索Amazon页面总点击）
     search_keyword = st.text_input(
         "🔍 链路搜索（支持站点/流量类型关键词）",
-        placeholder="输入关键词（如US/Shopify/DSP/页面总点击）",
-        help="支持站点、流量类型关键词搜索"
+        placeholder="输入关键词（如页面总点击/US/Shopify）",
+        help="支持搜索「页面总点击」快速定位新增链路"
     )
     
     # 清空搜索按钮
@@ -327,19 +349,19 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📅 日期范围")
     
-    # 日期输入（关键修改：使用自动提取的日期作为默认值）
+    # 日期输入
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input(
             "开始日期",
-            value=default_start_date,  # 自动提取的最小日期
+            value=default_start_date,
             help="默认显示Excel中的最早日期"
         )
     
     with col2:
         end_date = st.date_input(
             "结束日期",
-            value=default_end_date,  # 自动提取的最大日期
+            value=default_end_date,
             help="默认显示Excel中的最晚日期"
         )
     
@@ -374,11 +396,11 @@ with st.sidebar:
         )
     
     st.markdown("---")
-    st.info("💡 提示：点击图表节点可以查看详细信息")
+    st.info("💡 提示：点击图表节点可查看流入/流出数据及占比")
 
-# ===================== 7. 数据验证和后续处理 =====================
+# ===================== 7. 数据验证 =====================
 if df.empty:
-    st.error("❌ 无有效数据可展示，请上传正确的Excel文件")
+    st.error("❌ 无有效数据可展示，请根据上方提示检查Excel文件后重新上传")
     st.stop()
 
 # ===================== 8. 数据筛选和处理 =====================
@@ -387,11 +409,11 @@ with st.expander("📊 数据摘要", expanded=True):
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         total_records = len(df)
-        st.metric("总记录数", total_records)
+        st.metric("总链路记录数", total_records)
     
     with col2:
         traffic_types = df["traffic_type"].nunique()
-        st.metric("流量类型数", traffic_types)
+        st.metric("有效流量类型数", traffic_types)
     
     with col3:
         total_exposure = df[df["source"].str.contains("曝光")]["value"].sum()
@@ -404,17 +426,16 @@ with st.expander("📊 数据摘要", expanded=True):
 # 数据筛选聚合
 start_date_dt = pd.Timestamp(start_date)
 end_date_dt = pd.Timestamp(end_date)
-
 filtered_df = df[(df["date"] >= start_date_dt) & (df["date"] <= end_date_dt)]
 aggregated_df = filtered_df.groupby(["source", "target", "group", "traffic_type"], as_index=False)["value"].sum()
 aggregated_df = aggregated_df[aggregated_df["value"] > 0]
 
 # ===================== 9. 生成节点列表 =====================
-# 拆分流量类型为Amazon组和Shopify组
+# 拆分Amazon和Shopify流量类型
 Amazon_TRAFFIC = [t for t in TRAFFIC_ORDER if TRAFFIC_MAPPING[t]["site"] == "Amazon-US"]
 Shopify_TRAFFIC = [t for t in TRAFFIC_ORDER if TRAFFIC_MAPPING[t]["site"] == "Shopify"]
 
-# 分别生成Amazon组的节点
+# Amazon组节点（包含页面总点击）
 Amazon_flow_sources = Amazon_TRAFFIC
 Amazon_exposure_nodes = [TRAFFIC_MAPPING[t]["nodes"]["exposure"] for t in Amazon_TRAFFIC]
 Amazon_level2_exposure = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_exposure"] for t in Amazon_TRAFFIC]))
@@ -423,7 +444,7 @@ Amazon_level2_click = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_click"] for 
 Amazon_sales_nodes = [TRAFFIC_MAPPING[t]["nodes"]["sales"] for t in Amazon_TRAFFIC]
 Amazon_level2_sales = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_sales"] for t in Amazon_TRAFFIC]))
 
-# 分别生成Shopify组的节点
+# Shopify组节点
 Shopify_flow_sources = Shopify_TRAFFIC
 Shopify_exposure_nodes = [TRAFFIC_MAPPING[t]["nodes"]["exposure"] for t in Shopify_TRAFFIC]
 Shopify_level2_exposure = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_exposure"] for t in Shopify_TRAFFIC]))
@@ -432,29 +453,20 @@ Shopify_level2_click = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_click"] for
 Shopify_sales_nodes = [TRAFFIC_MAPPING[t]["nodes"]["sales"] for t in Shopify_TRAFFIC]
 Shopify_level2_sales = list(set([TRAFFIC_MAPPING[t]["nodes"]["level2_sales"] for t in Shopify_TRAFFIC]))
 
-# 总节点（曝光/点击/销量）
+# 总节点
 total_nodes = ["总曝光", "总点击", "总销量"]
 
-# 拼接节点列表：先Amazon组，再Shopify组（确保Shopify在下方）
+# 拼接所有节点（Amazon在前，Shopify在后）
 all_nodes = (
-    # Amazon组节点
     Amazon_flow_sources + Amazon_exposure_nodes + Amazon_level2_exposure + 
-    # 总曝光
-    total_nodes[:1] + 
-    # Amazon点击相关节点
+    total_nodes[:1] +  # 总曝光
     Amazon_click_nodes + Amazon_level2_click + 
-    # 总点击
-    total_nodes[1:2] + 
-    # Amazon销量相关节点
+    total_nodes[1:2] +  # 总点击
     Amazon_sales_nodes + Amazon_level2_sales + 
-    # Shopify组节点（放到Amazon之后，显示在下方）
     Shopify_flow_sources + Shopify_exposure_nodes + Shopify_level2_exposure + 
-    # Shopify点击相关节点
     Shopify_click_nodes + Shopify_level2_click + 
-    # Shopify销量相关节点
     Shopify_sales_nodes + Shopify_level2_sales + 
-    # 总销量
-    total_nodes[2:]
+    total_nodes[2:]  # 总销量
 )
 
 node_ids = {node: idx for idx, node in enumerate(all_nodes)}
@@ -466,37 +478,27 @@ for node in all_nodes:
     outgoing = aggregated_df[aggregated_df["source"] == node]["value"].sum()
     node_stats[node] = (incoming, outgoing)
 
-# 计算总节点的总流入（用于节点占比计算）
+# 总节点数值（用于计算占比）
 total_node_values = {
-    "总曝光": node_stats.get("总曝光", (0, 0))[0],  # 总曝光的总流入
-    "总点击": node_stats.get("总点击", (0, 0))[0],  # 总点击的总流入
-    "总销量": node_stats.get("总销量", (0, 0))[0]   # 总销量的总流入
+    "总曝光": node_stats.get("总曝光", (0, 0))[0],
+    "总点击": node_stats.get("总点击", (0, 0))[0],
+    "总销量": node_stats.get("总销量", (0, 0))[0]
 }
 
-# 生成节点的customdata（包含占比）
+# 节点自定义数据（包含占比）
 node_customdata = []
 for node in all_nodes:
     incoming = node_stats[node][0]
     outgoing = node_stats[node][1]
     ratio = ""
     
-    # 排除总曝光、总点击、总销量，不显示它们的占比
-    if node in ["总曝光", "总点击", "总销量"]:
-        pass  # 这三个节点的占比设为空
-    else:
-        # 判断节点类型，计算占对应总节点的比例
-        if "曝光" in node:
-            total = total_node_values["总曝光"]
-            if total > 0:
-                ratio = f"占总曝光：{round((outgoing / total) * 100, 2)}%"
-        elif "点击" in node:
-            total = total_node_values["总点击"]
-            if total > 0:
-                ratio = f"占总点击：{round((outgoing / total) * 100, 2)}%"
-        elif "销量" in node:
-            total = total_node_values["总销量"]
-            if total > 0:
-                ratio = f"占总销量：{round((outgoing / total) * 100, 2)}%"
+    if node not in ["总曝光", "总点击", "总销量"]:
+        if "曝光" in node and total_node_values["总曝光"] > 0:
+            ratio = f"占总曝光：{round((outgoing / total_node_values['总曝光']) * 100, 2)}%"
+        elif "点击" in node and total_node_values["总点击"] > 0:
+            ratio = f"占总点击：{round((outgoing / total_node_values['总点击']) * 100, 2)}%"
+        elif "销量" in node and total_node_values["总销量"] > 0:
+            ratio = f"占总销量：{round((outgoing / total_node_values['总销量']) * 100, 2)}%"
     
     node_customdata.append((incoming, outgoing, ratio))
 
@@ -507,17 +509,14 @@ matched_traffic_types = []
 if not search_keyword:
     matched_traffic_types = TRAFFIC_ORDER
 else:
-    matched_sites = []
-    for site in SITE_CONFIG:
-        if search_keyword in site.lower() or search_keyword in SITE_CONFIG[site]["cn_name"].lower():
-            matched_sites.append(site)
-    
+    # 匹配站点或流量类型
+    matched_sites = [site for site in SITE_CONFIG if search_keyword in site.lower() or search_keyword in SITE_CONFIG[site]["cn_name"].lower()]
     if matched_sites:
         matched_traffic_types = [t for t in TRAFFIC_ORDER if TRAFFIC_MAPPING[t]["site"] in matched_sites]
     else:
         matched_traffic_types = [t for t in TRAFFIC_ORDER if search_keyword in t.lower()]
 
-# 生成匹配节点列表
+# 匹配节点列表
 matched_nodes = []
 for traffic_type in matched_traffic_types:
     cfg = TRAFFIC_MAPPING[traffic_type]
@@ -555,17 +554,20 @@ for _, row in aggregated_df.iterrows():
     group = row["group"]
     traffic_type = row["traffic_type"]
     
+    # 链路匹配与缩放
     is_matched = traffic_type in matched_traffic_types
     is_exposure = (source, target) in exposure_link
     base_scaled_val = original_val * (exposure_scale if is_exposure else later_scale)
     final_val = base_scaled_val if is_matched else base_scaled_val * 0.05
     
-    # 核心：百分比计算（保留2位小数）
+    # 计算占比
     target_total = total_incoming.get(target, 1)
     ratio = round((original_val / target_total) * 100, 2)
     
+    # 链路颜色
     final_color = GROUP_COLORS[group] if is_matched else "rgba(200, 200, 200, 0.2)"
     
+    # 收集链路数据
     link_sources.append(node_ids[source])
     link_targets.append(node_ids[target])
     link_values.append(final_val)
@@ -609,7 +611,7 @@ fig = go.Figure(data=[go.Sankey(
     )
 )])
 
-# 添加标题
+# 图表标题（包含搜索关键词）
 title_text = f"多站点流量转化路径（{start_date} 至 {end_date}）"
 if search_keyword:
     title_text += f" | 高亮：{search_keyword}"
@@ -627,31 +629,37 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True, height=800)
 
 # ===================== 15. 数据显示区域 =====================
-with st.expander("📋 查看详细数据"):
-    tab1, tab2, tab3 = st.tabs(["原始数据", "流量类型统计", "站点统计"])
+with st.expander("📋 查看详细数据", expanded=False):
+    tab1, tab2, tab3 = st.tabs(["原始链路数据", "流量类型统计", "站点配置"])
     
     with tab1:
-        st.dataframe(filtered_df.head(100))
+        st.dataframe(filtered_df.head(100).style.set_caption("筛选后的前100条链路数据"))
     
     with tab2:
-        # 按流量类型汇总
+        # 流量类型汇总统计
         traffic_summary = filtered_df.groupby("traffic_type").agg({
             "value": ["sum", "count"]
         }).round(2)
         traffic_summary.columns = ["总数值", "记录数"]
-        st.dataframe(traffic_summary)
+        st.dataframe(traffic_summary.style.set_caption("各流量类型数据统计"))
     
     with tab3:
-        # 站点统计
-        st.write("**站点配置:**")
-        for site, info in SITE_CONFIG.items():
-            st.write(f"- {site}: {info['cn_name']}")
+        # 站点配置与流量类型分布
+        st.subheader("站点配置详情")
+        site_df = pd.DataFrame([
+            {"站点标识": site, "中文名称": info["cn_name"], "颜色代码": info["color"]}
+            for site, info in SITE_CONFIG.items()
+        ])
+        st.dataframe(site_df)
         
-        st.write(f"\n**流量类型总数:** {len(TRAFFIC_ORDER)}")
-        st.write(f"**匹配的流量类型:** {len(matched_traffic_types)}")
+        st.subheader("流量类型分布")
+        traffic_dist = pd.DataFrame([
+            {"流量类型": t, "所属站点": TRAFFIC_MAPPING[t]["site"], "分组ID": TRAFFIC_MAPPING[t]["group_id"]}
+            for t in TRAFFIC_ORDER
+        ])
+        st.dataframe(traffic_dist)
 
 # ===================== 16. 页脚信息 =====================
 st.markdown("---")
 st.caption(f"📅 数据更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.caption("💡 提示：修改Excel文件后，重新上传即可更新图表和默认日期范围")
-
+st.caption("💡 操作提示：1. 上传Excel后可查看数据排查日志；2. 搜索「页面总点击」可快速定位新增链路")
